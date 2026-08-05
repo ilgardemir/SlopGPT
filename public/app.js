@@ -4,7 +4,7 @@ const OPENROUTER_API_KEY = [
   'b1a7f0ecc5888fd8cf37fb0311554658',
   '35dc51baab2dee4ba38a414560992d97'
 ].join('');
-const OPENROUTER_MODEL = 'openrouter/auto';
+const OPENROUTER_MODEL = 'openai/gpt-5-nano';
 
 const form = document.querySelector('#ideaForm');
 const ideaInput = document.querySelector('#idea');
