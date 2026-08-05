@@ -6,6 +6,60 @@ const OPENROUTER_API_KEY = [
 ].join('');
 const OPENROUTER_MODEL = 'openai/gpt-5-nano';
 
+const STARTUP_ANALYSIS_SCHEMA = {
+  name: 'startup_analysis',
+  strict: true,
+  schema: {
+    type: 'object',
+    properties: {
+      name: { type: 'string' },
+      tagline: { type: 'string' },
+      vibeScore: { type: 'integer', minimum: 0, maximum: 100 },
+      slopRisk: { type: 'integer', minimum: 0, maximum: 100 },
+      marketNeed: { type: 'integer', minimum: 0, maximum: 100 },
+      buildDifficulty: { type: 'integer', minimum: 0, maximum: 100 },
+      verdict: { type: 'string' },
+      strongestAngle: { type: 'string' },
+      biggestProblem: { type: 'string' },
+      unfairAdvantages: {
+        type: 'array',
+        items: { type: 'string' },
+        minItems: 3,
+        maxItems: 5
+      },
+      features: {
+        type: 'array',
+        items: { type: 'string' },
+        minItems: 3,
+        maxItems: 5
+      },
+      nextSteps: {
+        type: 'array',
+        items: { type: 'string' },
+        minItems: 3,
+        maxItems: 5
+      },
+      roast: { type: 'string' }
+    },
+    required: [
+      'name',
+      'tagline',
+      'vibeScore',
+      'slopRisk',
+      'marketNeed',
+      'buildDifficulty',
+      'verdict',
+      'strongestAngle',
+      'biggestProblem',
+      'unfairAdvantages',
+      'features',
+      'nextSteps',
+      'roast'
+    ],
+    additionalProperties: false
+  }
+};
+
 const form = document.querySelector('#ideaForm');
 const ideaInput = document.querySelector('#idea');
 const audienceInput = document.querySelector('#audience');
@@ -68,8 +122,65 @@ function extractJson(text) {
     if (start !== -1 && end > start) {
       return JSON.parse(cleaned.slice(start, end + 1));
     }
-    throw new Error('The AI generated revolutionary thoughts in an unrevolutionary format. Please try again.');
+    throw new Error('The model responded, but its output was not valid JSON. Retry the request.');
   }
+}
+
+function getMessageText(message) {
+  if (typeof message?.content === 'string') return message.content;
+  if (Array.isArray(message?.content)) {
+    return message.content
+      .map((part) => (typeof part === 'string' ? part : part?.text || part?.content || ''))
+      .join('')
+      .trim();
+  }
+  return '';
+}
+
+function compactMetadata(value) {
+  if (!value) return '';
+  if (typeof value === 'string') return value.slice(0, 240);
+  try {
+    return JSON.stringify(value).slice(0, 240);
+  } catch {
+    return String(value).slice(0, 240);
+  }
+}
+
+function describeOpenRouterError(payload, response) {
+  const apiError = payload?.error || {};
+  const metadata = apiError?.metadata || {};
+  const parts = [apiError?.message || payload?.message || 'OpenRouter rejected the request'];
+
+  parts.push(`HTTP ${response.status}`);
+  if (apiError?.code && Number(apiError.code) !== response.status) {
+    parts.push(`API code ${apiError.code}`);
+  }
+  if (metadata?.error_type) parts.push(`type: ${metadata.error_type}`);
+  if (metadata?.provider_name) parts.push(`provider: ${metadata.provider_name}`);
+  if (metadata?.model_slug) parts.push(`model: ${metadata.model_slug}`);
+
+  const providerDetail = compactMetadata(
+    metadata?.provider_error || metadata?.raw || metadata?.details
+  );
+  if (providerDetail) parts.push(providerDetail);
+
+  const requestId = response.headers.get('x-request-id');
+  if (requestId) parts.push(`request: ${requestId}`);
+
+  return parts.join(' · ');
+}
+
+function describeClientError(error) {
+  if (error?.name === 'AbortError') {
+    return 'The OpenRouter request timed out after 45 seconds. Retry once; if it persists, the model provider may be overloaded.';
+  }
+
+  const message = error instanceof Error ? error.message : String(error || 'Unknown error');
+  if (/failed to fetch|networkerror|load failed/i.test(message)) {
+    return `The browser could not reach OpenRouter. Check the internet connection, privacy/ad-blocking extensions, and whether the page is served over HTTPS. Browser detail: ${message}`;
+  }
+  return message;
 }
 
 function renderList(items) {
@@ -177,32 +288,18 @@ form.addEventListener('submit', async (event) => {
   const brutality = new FormData(form).get('brutality') || 'balanced';
   const systemPrompt = `You are VibeScore AI, an expert startup strategist, product visionary, innovation guru, and brutally honest critic. Analyze the startup idea accurately and constructively. Avoid invented market statistics, guaranteed outcomes, or claims of certainty. Identify whether this is a useful vertical product or just a thin generic AI wrapper. The feedback tone is ${brutality}.
 
-Write with comically generic AI-business language such as unlock, supercharge, revolutionary, empower, next-generation, actionable, seamless, ecosystem, transformative, and future-ready—but keep the actual product analysis useful.
-
-Return ONLY valid JSON with exactly this structure:
-{
-  "name": "suggested product name",
-  "tagline": "generic AI startup tagline",
-  "vibeScore": 0,
-  "slopRisk": 0,
-  "marketNeed": 0,
-  "buildDifficulty": 0,
-  "verdict": "2-4 sentence useful assessment",
-  "strongestAngle": "specific strongest angle",
-  "biggestProblem": "specific biggest weakness",
-  "unfairAdvantages": ["item", "item", "item"],
-  "features": ["feature", "feature", "feature"],
-  "nextSteps": ["step", "step", "step"],
-  "roast": "one funny but non-cruel sentence"
-}`;
+Write with comically generic AI-business language such as unlock, supercharge, revolutionary, empower, next-generation, actionable, seamless, ecosystem, transformative, and future-ready—but keep the actual product analysis useful.`;
 
   const userPrompt = `REVOLUTIONARY STARTUP VISION:\n${idea}\n\nDREAM CUSTOMERS:\n${audienceInput.value.trim() || 'Not specified'}\n\nREVENUE MAGIC:\n${businessModelInput.value.trim() || 'Not specified'}`;
 
   setLoading(true);
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 45000);
 
   try {
     const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
       method: 'POST',
+      signal: controller.signal,
       headers: {
         Authorization: `Bearer ${OPENROUTER_API_KEY}`,
         'Content-Type': 'application/json',
@@ -215,26 +312,48 @@ Return ONLY valid JSON with exactly this structure:
           { role: 'system', content: systemPrompt },
           { role: 'user', content: userPrompt }
         ],
-        temperature: 0.82,
-        max_tokens: 1400
+        reasoning: {
+          effort: 'minimal',
+          exclude: true
+        },
+        response_format: {
+          type: 'json_schema',
+          json_schema: STARTUP_ANALYSIS_SCHEMA
+        },
+        max_tokens: 2200
       })
     });
 
-    const payload = await response.json().catch(() => ({}));
-    if (!response.ok) {
-      const message = payload?.error?.message || payload?.message || `OpenRouter returned error ${response.status}.`;
-      throw new Error(message);
+    const rawBody = await response.text();
+    let payload;
+    try {
+      payload = rawBody ? JSON.parse(rawBody) : {};
+    } catch {
+      throw new Error(`OpenRouter returned an unreadable response (HTTP ${response.status}): ${rawBody.slice(0, 180) || 'empty body'}`);
     }
 
-    const content = payload?.choices?.[0]?.message?.content;
-    if (!content) throw new Error('The neural engine returned zero vibes. Try again.');
+    if (!response.ok || payload?.error) {
+      throw new Error(describeOpenRouterError(payload, response));
+    }
+
+    const choice = payload?.choices?.[0];
+    const content = getMessageText(choice?.message);
+    if (!content) {
+      const finishReason = choice?.finish_reason || 'missing';
+      const completionTokens = payload?.usage?.completion_tokens;
+      const tokenDetail = Number.isFinite(completionTokens)
+        ? ` Completion tokens: ${completionTokens}.`
+        : '';
+      throw new Error(`OpenRouter returned no visible answer (finish reason: ${finishReason}).${tokenDetail}`);
+    }
 
     renderResult(extractJson(content), payload.model || OPENROUTER_MODEL);
   } catch (error) {
-    errorBox.textContent = `⚠️ AI disruption failed: ${error instanceof Error ? error.message : 'Unknown error.'}`;
+    errorBox.textContent = `⚠️ AI disruption failed: ${describeClientError(error)}`;
     errorBox.hidden = false;
     errorBox.scrollIntoView({ behavior: 'smooth', block: 'center' });
   } finally {
+    clearTimeout(timeoutId);
     setLoading(false);
   }
 });
