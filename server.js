@@ -57,7 +57,7 @@ const REASONING_CONFIG =
     : { effort: REASONING_EFFORT, exclude: true };
 
 const MAX_BODY_BYTES = 16 * 1024;
-const UPSTREAM_TIMEOUT_MS = 45000;
+const UPSTREAM_TIMEOUT_MS = Number(process.env.UPSTREAM_TIMEOUT_MS) || 45000;
 const MAX_IDEA_LENGTH = 3000;
 const MAX_FIELD_LENGTH = 500;
 const MIN_IDEA_LENGTH = 20;
@@ -280,6 +280,7 @@ async function handleAnalyze(req, res) {
 
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), UPSTREAM_TIMEOUT_MS);
+  const startedAt = Date.now();
 
   try {
     const upstream = await fetch(OPENROUTER_URL, {
@@ -299,10 +300,16 @@ async function handleAnalyze(req, res) {
         ],
         reasoning: REASONING_CONFIG,
         response_format: { type: 'json_schema', json_schema: STARTUP_ANALYSIS_SCHEMA },
-        // Several DeepSeek V4 Flash providers expose `response_format` but NOT
-        // `structured_outputs`. Without this, OpenRouter may route to one of them and the
-        // strict schema is silently ignored, producing free-form prose instead of JSON.
-        provider: { require_parameters: true },
+        provider: {
+          // Several DeepSeek V4 Flash providers expose `response_format` but NOT
+          // `structured_outputs`. Without this, OpenRouter may route to one of them and
+          // the strict schema is silently ignored, producing prose instead of JSON.
+          require_parameters: true,
+          // Default routing is price-weighted (inverse square of price), which favours the
+          // cheapest provider rather than a fast one and can land on a degraded endpoint.
+          // This is an interactive request with a human waiting, so sort by throughput.
+          sort: 'throughput'
+        },
         max_tokens: 2200
       })
     });
@@ -356,19 +363,33 @@ async function handleAnalyze(req, res) {
       return;
     }
 
+    console.log(
+      `[upstream] ok in ${Date.now() - startedAt}ms · provider: ${payload.provider || 'unknown'} · ` +
+        `model: ${payload.model || OPENROUTER_MODEL} · ` +
+        `tokens: ${payload?.usage?.completion_tokens ?? '?'} completion / ` +
+        `${payload?.usage?.completion_tokens_details?.reasoning_tokens ?? 0} reasoning`
+    );
+
     sendJson(res, 200, {
       model: payload.model || OPENROUTER_MODEL,
       analysis: extractJson(content)
     });
   } catch (error) {
+    const elapsed = Date.now() - startedAt;
     if (error?.name === 'AbortError') {
+      console.error(
+        `[upstream] TIMEOUT after ${elapsed}ms · model: ${OPENROUTER_MODEL} · ` +
+          `reasoning effort: ${REASONING_EFFORT} · sort: throughput · require_parameters: true\n` +
+          '[upstream] Run `npm run probe` with the same key to see which provider is slow.'
+      );
       sendApiError(
         res,
         504,
-        'The OpenRouter request timed out after 45 seconds. Retry once; if it persists, the model provider may be overloaded.'
+        `The request timed out after ${Math.round(UPSTREAM_TIMEOUT_MS / 1000)} seconds. Retry once; if it persists, the model provider may be overloaded.`
       );
       return;
     }
+    console.error(`[upstream] failed after ${elapsed}ms: ${error instanceof Error ? error.message : error}`);
     sendApiError(res, 502, error instanceof Error ? error.message : 'Unknown upstream error');
   } finally {
     clearTimeout(timeoutId);
