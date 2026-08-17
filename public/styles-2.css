@@ -53,5 +53,30 @@
    push Unfair Advantages to 1494px inside a 1121px grid and give the page 503px of
    horizontal scroll. min-width:0 lets the track shrink; overflow-wrap:anywhere lets the
    token break instead of pushing. This also covers honest input such as a long URL. */
+.followup{margin-top:15px;padding:19px;border:1px solid var(--line);border-radius:15px;background:linear-gradient(145deg,#fff,#faf7ff)}
+.followup-kicker{color:#7c3aed;font-size:.65rem;font-weight:900;letter-spacing:.09em}
+.followup-head h3{margin:7px 0 5px;font:800 1.05rem Manrope}
+.followup-head p{margin:0;max-width:60ch;color:#655c72;font-size:.76rem;line-height:1.65}
+.followup-thread{display:flex;flex-direction:column;gap:11px;margin-top:17px}
+.followup-thread:empty{display:none}
+.bubble{max-width:min(88%,560px);padding:12px 15px;border-radius:15px;font-size:.79rem;line-height:1.68;overflow-wrap:anywhere}
+.bubble p{margin:0}
+.bubble p+p{margin-top:9px}
+.bubble-who{display:block;margin-bottom:5px;font-size:.6rem;font-weight:900;letter-spacing:.08em}
+.bubble-user{align-self:flex-end;border-bottom-right-radius:5px;color:#fff;background:linear-gradient(115deg,#6d28d9,#a855f7 62%,#ec4899);box-shadow:0 10px 24px rgba(124,58,237,.2)}
+.bubble-user .bubble-who{color:rgba(255,255,255,.75)}
+.bubble-ai{align-self:flex-start;border:1px solid var(--line);border-bottom-left-radius:5px;color:#5f566b;background:#fff}
+.bubble-ai .bubble-who{color:#7c3aed}
+.bubble-thinking p{color:#8b81a0}
+.followup-form{margin-top:15px}
+.followup-input{display:flex;align-items:flex-end;gap:9px}
+.followup-input textarea{flex:1;min-width:0;padding:12px 14px;border:1px solid rgba(95,69,130,.14);border-radius:12px;outline:none;resize:vertical;color:#392c46;background:#fcfaff;font-size:.79rem;line-height:1.6;transition:.2s}
+.followup-input textarea:focus{border-color:#a855f7;box-shadow:0 0 0 4px rgba(168,85,247,.1)}
+.followup-input textarea:disabled{color:#8b81a0;background:#f6f3fa;cursor:not-allowed}
+.followup-send{flex:none;min-height:46px;padding:0 20px;border:0;border-radius:12px;color:#fff;background:linear-gradient(100deg,#6d28d9,#a855f7 55%,#ec4899);font-size:.76rem;font-weight:900;cursor:pointer;box-shadow:0 12px 26px rgba(124,58,237,.22);transition:.18s}
+.followup-send:hover:not(:disabled){transform:translateY(-2px)}
+.followup-send:disabled{cursor:not-allowed;opacity:.55;box-shadow:none}
+.followup-meta{display:flex;flex-wrap:wrap;justify-content:space-between;gap:8px;margin:9px 0 0;color:#6b6279;font-size:.68rem;font-weight:700}
+.followup-error{margin:11px 0 0;padding:10px 12px;border:1px solid #fca5a5;border-radius:11px;color:#8f1d1d;background:#fef2f2;font-size:.73rem;line-height:1.6;overflow-wrap:anywhere}
 .result-columns>*,.list-grid>*,.score-grid>*,.result-top>*{min-width:0}
 .result-top h2,.result-tagline,.result-badge,.verdict-card p,.insight-card p,.list-card li,.roast-card{overflow-wrap:anywhere}

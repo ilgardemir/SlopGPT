@@ -13,6 +13,18 @@ browser  ──POST /api/analyze──▶  server.js  ──Bearer key──▶ 
          ◀──{ model, analysis }──           ◀──────────────
 ```
 
+Once results are on screen, the same card offers up to eight follow-up questions:
+
+```
+browser  ──POST /api/followup─▶  server.js  ──Bearer key──▶  openrouter.ai
+         ◀─{ answer, remaining }─           ◀──────────────
+```
+
+The server holds no session, so the browser posts the original submission, the analysis,
+and the transcript so far with every question. All of it is client-supplied, so
+`/api/followup` rebuilds the analysis from a whitelist of known fields, clamps the
+transcript, and enforces the eight-question cap itself rather than trusting the page.
+
 ## Run it locally
 
 Requires Node 20.18+ (built-in `fetch` and `--env-file-if-exists`). No dependencies to install.
@@ -100,6 +112,10 @@ revoked, deleted, truncated, or from a different account. No code change will he
 - `/api/analyze` is a fixed-purpose endpoint: the model, prompt, and response schema are
   hardcoded server-side, so it cannot be repurposed as a general LLM proxy. Callers only
   control the four form fields, which are length-capped.
+- `/api/followup` accepts more caller-supplied context (the analysis and the transcript),
+  which is why it rebuilds both from a whitelist with per-field length caps before they
+  reach the prompt. The system prompt, model, and turn cap stay server-side. It is still
+  the wider surface of the two — if this ever grows a rate limiter, start there.
 - There is **no rate limiting**. A public deployment can be called in a loop by anyone who
   finds the URL. Keep a spend cap on the OpenRouter key.
 - An earlier commit (`742eafe`) contained a live key in `public/app.js`. That key is
@@ -109,5 +125,5 @@ revoked, deleted, truncated, or from a different account. No code change will he
 
 - `public/index.html` — the extremely AI-generated landing page and app UI
 - `public/styles.css` — imports `styles-1/2/3.css`: gradients, glass cards, fake testimonials, pricing
-- `public/app.js` — form handling, `/api/analyze` call, result rendering
-- `server.js` — static file server plus the OpenRouter proxy endpoint
+- `public/app.js` — form handling, the two API calls, result rendering, follow-up thread
+- `server.js` — static file server plus the two OpenRouter proxy endpoints

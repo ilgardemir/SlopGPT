@@ -63,6 +63,18 @@ const MAX_FIELD_LENGTH = 500;
 const MIN_IDEA_LENGTH = 20;
 const BRUTALITY_MODES = new Set(['supportive', 'balanced', 'savage']);
 
+// A follow-up carries the whole analysis and the transcript so far, so it will not fit in
+// the 16 KB that a bare idea needs. The rest of these caps bound what the browser can push
+// into the prompt: /api/followup is the one endpoint where the client supplies model
+// context rather than just a question, so none of it is taken on trust.
+const MAX_FOLLOWUP_BODY_BYTES = 64 * 1024;
+const MAX_QUESTION_LENGTH = 500;
+const MIN_QUESTION_LENGTH = 3;
+const MAX_FOLLOWUP_TURNS = 8;
+const MAX_HISTORY_ENTRIES = MAX_FOLLOWUP_TURNS * 2;
+const MAX_HISTORY_ENTRY_LENGTH = 2000;
+const MAX_LIST_ITEM_LENGTH = 220;
+
 const MIME_TYPES = {
   '.html': 'text/html; charset=utf-8',
   '.css': 'text/css; charset=utf-8',
@@ -240,6 +252,100 @@ Score marketNeed, buildDifficulty and slopRisk independently, then set vibeScore
   return { systemPrompt, userPrompt };
 }
 
+// The browser posts the analysis back to us because the server keeps no session state.
+// That makes it client-supplied prompt material, so rebuild it field by field from a
+// whitelist with the same caps the schema enforces, rather than forwarding whatever
+// arrived. Anything unrecognised is dropped instead of reaching the model.
+function sanitizeAnalysis(raw) {
+  if (!raw || typeof raw !== 'object') return null;
+
+  const score = (value) => Math.max(0, Math.min(100, Math.round(Number(value) || 0)));
+  const list = (value) =>
+    (Array.isArray(value) ? value : [])
+      .slice(0, 5)
+      .map((item) => trimmedField(item, MAX_LIST_ITEM_LENGTH))
+      .filter(Boolean);
+
+  return {
+    name: trimmedField(raw.name, 90),
+    tagline: trimmedField(raw.tagline, 180),
+    vibeScore: score(raw.vibeScore),
+    slopRisk: score(raw.slopRisk),
+    marketNeed: score(raw.marketNeed),
+    buildDifficulty: score(raw.buildDifficulty),
+    verdict: trimmedField(raw.verdict, 1000),
+    strongestAngle: trimmedField(raw.strongestAngle, MAX_FIELD_LENGTH),
+    biggestProblem: trimmedField(raw.biggestProblem, MAX_FIELD_LENGTH),
+    unfairAdvantages: list(raw.unfairAdvantages),
+    features: list(raw.features),
+    nextSteps: list(raw.nextSteps),
+    roast: trimmedField(raw.roast, 600)
+  };
+}
+
+// Same treatment for the transcript: only two roles exist, only the last few turns are
+// kept, and each turn is truncated so a long thread cannot grow the prompt without bound.
+function sanitizeHistory(raw) {
+  if (!Array.isArray(raw)) return [];
+
+  const clean = [];
+  for (const entry of raw.slice(-MAX_HISTORY_ENTRIES)) {
+    const role = entry?.role === 'assistant' ? 'assistant' : entry?.role === 'user' ? 'user' : null;
+    const content = trimmedField(entry?.content, MAX_HISTORY_ENTRY_LENGTH);
+    if (role && content) clean.push({ role, content });
+  }
+  return clean;
+}
+
+function buildFollowupMessages({ idea, audience, businessModel, brutality, analysis, history, question }) {
+  const bullets = (items) => (items.length ? items.map((item) => `- ${item}`).join('\n') : '- (none returned)');
+
+  const systemPrompt = `You are VibeScore AI, the same expert startup strategist, product visionary, innovation guru and brutally honest critic who produced the analysis below. The founder has now read their results and is asking follow-up questions about them.
+
+Answer the question they actually asked. Use the analysis as shared context you both already have — do not re-run it, do not recite the scores back unless a number is load-bearing for your answer, and never invent market statistics, funding figures, competitor revenue, or claims of certainty. Where it helps, propose specific improvements: what to sharpen, cut, change, or test next, and why it would move the score they care about.
+
+Keep writing in comically generic AI-business language such as unlock, supercharge, revolutionary, empower, next-generation, actionable, seamless, ecosystem, transformative, and future-ready — while keeping the actual advice specific and genuinely useful. The feedback tone is ${brutality}.
+
+Reply with two to four short paragraphs of ordinary readable prose. No markdown, no headings, no bullet lists, no JSON, and never emit identifiers, schema keys, camelCase names, or underscore-joined tokens as the content of your answer. Keep it under 220 words.
+
+If the founder asks for something the analysis cannot support — hard market data, a guarantee, or a prediction — say so plainly in one sentence and give them the closest useful thing instead.
+
+## THE SUBMISSION YOU ANALYZED
+Idea: ${idea}
+Dream customers: ${audience || 'Not specified'}
+Revenue magic: ${businessModel || 'Not specified'}
+
+## THE ANALYSIS YOU ALREADY GAVE THEM
+Name: ${analysis.name}
+Tagline: ${analysis.tagline}
+
+Vibe Score: ${analysis.vibeScore}/100 (higher is better — is this worth their next six months)
+Slop Risk: ${analysis.slopRisk}/100 (LOWER is better — how close this is to generic AI-wrapper slop)
+Market Need: ${analysis.marketNeed}/100 (higher is better — how badly the audience feels the problem)
+Build Difficulty: ${analysis.buildDifficulty}/100 (higher means harder; neither good nor bad on its own)
+
+Verdict: ${analysis.verdict}
+Strongest angle: ${analysis.strongestAngle}
+Biggest problem: ${analysis.biggestProblem}
+
+Unfair advantages:
+${bullets(analysis.unfairAdvantages)}
+
+Must-have features:
+${bullets(analysis.features)}
+
+Next steps:
+${bullets(analysis.nextSteps)}
+
+Founder reality check: ${analysis.roast}`;
+
+  return [
+    { role: 'system', content: systemPrompt },
+    ...history,
+    { role: 'user', content: question }
+  ];
+}
+
 function getMessageText(message) {
   if (typeof message?.content === 'string') return message.content;
   if (Array.isArray(message?.content)) {
@@ -315,8 +421,10 @@ function appUrl(req) {
 }
 
 // Returns a discriminated result instead of writing to `res`, so the caller can make a
-// second attempt when the first one comes back degenerate.
-async function callModel({ systemPrompt, userPrompt, referer, signal }) {
+// second attempt when the first one comes back degenerate. Shared by /api/analyze (strict
+// JSON schema) and /api/followup (plain prose) — everything below the `messages` and
+// `responseFormat` arguments is identical for both.
+async function callOpenRouter({ messages, responseFormat, maxTokens, referer, signal }) {
   const upstream = await fetch(OPENROUTER_URL, {
     method: 'POST',
     signal,
@@ -328,12 +436,9 @@ async function callModel({ systemPrompt, userPrompt, referer, signal }) {
     },
     body: JSON.stringify({
       model: OPENROUTER_MODEL,
-      messages: [
-        { role: 'system', content: systemPrompt },
-        { role: 'user', content: userPrompt }
-      ],
+      messages,
       reasoning: REASONING_CONFIG,
-      response_format: { type: 'json_schema', json_schema: STARTUP_ANALYSIS_SCHEMA },
+      ...(responseFormat ? { response_format: responseFormat } : {}),
       provider: {
         // Several DeepSeek V4 Flash providers expose `response_format` but NOT
         // `structured_outputs`. Without this, OpenRouter may route to one of them and
@@ -344,7 +449,7 @@ async function callModel({ systemPrompt, userPrompt, referer, signal }) {
         // This is an interactive request with a human waiting, so sort by throughput.
         sort: 'throughput'
       },
-      max_tokens: 2200
+      max_tokens: maxTokens
     })
   });
 
@@ -397,26 +502,50 @@ async function callModel({ systemPrompt, userPrompt, referer, signal }) {
     };
   }
 
-  return { kind: 'ok', requestId, payload, analysis: extractJson(content) };
+  return { kind: 'ok', requestId, payload, content };
 }
 
-async function handleAnalyze(req, res) {
+async function callModel({ systemPrompt, userPrompt, referer, signal }) {
+  const result = await callOpenRouter({
+    messages: [
+      { role: 'system', content: systemPrompt },
+      { role: 'user', content: userPrompt }
+    ],
+    responseFormat: { type: 'json_schema', json_schema: STARTUP_ANALYSIS_SCHEMA },
+    maxTokens: 2200,
+    referer,
+    signal
+  });
+
+  if (result.kind !== 'ok') return result;
+  return { ...result, analysis: extractJson(result.content) };
+}
+
+// Both endpoints need a POST and a configured key before they can do anything useful.
+// Returns false once it has written the response, so the caller can simply bail.
+function endpointIsUsable(req, res, endpoint) {
   if (req.method !== 'POST') {
     res.setHeader('Allow', 'POST');
     sendApiError(res, 405, 'This endpoint only accepts POST requests.');
-    return;
+    return false;
   }
 
   if (!OPENROUTER_API_KEY) {
     // The operator needs the variable name; a visitor needs to know it is not their fault.
     // Keep the actionable detail in the server log, not in the browser.
     console.error(
-      '[config] /api/analyze called with no OPENROUTER_API_KEY set. Add it to the Railway ' +
+      `[config] ${endpoint} called with no OPENROUTER_API_KEY set. Add it to the Railway ` +
         'service variables (or a local .env) and restart.'
     );
     sendApiError(res, 503, 'The idea validator is offline right now. This is a problem on our side, not yours — try again shortly.');
-    return;
+    return false;
   }
+
+  return true;
+}
+
+async function handleAnalyze(req, res) {
+  if (!endpointIsUsable(req, res, '/api/analyze')) return;
 
   let body;
   try {
@@ -527,11 +656,135 @@ async function handleAnalyze(req, res) {
   }
 }
 
+async function handleFollowup(req, res) {
+  if (!endpointIsUsable(req, res, '/api/followup')) return;
+
+  let body;
+  try {
+    body = await readJsonBody(req, MAX_FOLLOWUP_BODY_BYTES);
+  } catch (error) {
+    const status = error.status || 400;
+    sendApiError(res, status, error.message);
+    if (status === 413) res.on('finish', () => req.destroy());
+    return;
+  }
+
+  const question = trimmedField(body.question, MAX_QUESTION_LENGTH);
+  if (question.length < MIN_QUESTION_LENGTH) {
+    sendApiError(res, 400, 'Ask an actual question and the neural engine will consider it.');
+    return;
+  }
+
+  const idea = trimmedField(body.idea, MAX_IDEA_LENGTH);
+  if (idea.length < MIN_IDEA_LENGTH) {
+    sendApiError(res, 400, 'Run an analysis first — follow-ups need an idea to follow up on.');
+    return;
+  }
+
+  const analysis = sanitizeAnalysis(body.analysis);
+  if (!analysis || !analysis.verdict) {
+    sendApiError(res, 400, 'That analysis is missing or malformed. Run the analysis again, then ask.');
+    return;
+  }
+
+  const history = sanitizeHistory(body.history);
+  // Backstop for the client's own cap: the disabled textarea is a courtesy, not a control.
+  const askedSoFar = history.filter((entry) => entry.role === 'user').length;
+  if (askedSoFar >= MAX_FOLLOWUP_TURNS) {
+    sendApiError(
+      res,
+      429,
+      `That is ${MAX_FOLLOWUP_TURNS} follow-ups on one idea — the free tier's neural generosity is exhausted. Run a new analysis to keep going.`
+    );
+    return;
+  }
+
+  const rawBrutality = trimmedField(body.brutality, 20);
+  const messages = buildFollowupMessages({
+    idea,
+    audience: trimmedField(body.audience, MAX_FIELD_LENGTH),
+    businessModel: trimmedField(body.businessModel, MAX_FIELD_LENGTH),
+    brutality: BRUTALITY_MODES.has(rawBrutality) ? rawBrutality : 'balanced',
+    analysis,
+    history,
+    question
+  });
+
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), UPSTREAM_TIMEOUT_MS);
+  const startedAt = Date.now();
+
+  try {
+    const referer = appUrl(req);
+    const request = { responseFormat: null, maxTokens: 700, referer, signal: controller.signal };
+
+    let result = await callOpenRouter({ ...request, messages });
+    let answer = result.kind === 'ok' ? result.content.trim() : '';
+    let run = answer ? longestUnbrokenRun(answer) : 0;
+
+    // Same stochastic collapse the analyze path guards against (see findDegenerateField),
+    // and the same fix: one retry with an explicit "write prose" instruction.
+    if (run >= MAX_UNBROKEN_RUN) {
+      console.warn(`[degenerate] follow-up answer contained a ${run}-character unbroken run · retrying once`);
+      const [system, ...rest] = messages;
+      result = await callOpenRouter({
+        ...request,
+        messages: [{ role: 'system', content: system.content + ANTI_DEGENERATION_NUDGE }, ...rest]
+      });
+      answer = result.kind === 'ok' ? result.content.trim() : '';
+      run = answer ? longestUnbrokenRun(answer) : 0;
+    }
+
+    if (result.requestId) res.setHeader('x-request-id', result.requestId);
+
+    if (result.kind === 'error') {
+      sendApiError(res, result.status, result.message);
+      return;
+    }
+
+    if (result.kind === 'relay') {
+      sendJson(res, result.status, result.payload);
+      return;
+    }
+
+    if (run >= MAX_UNBROKEN_RUN) {
+      console.error(`[degenerate] follow-up retry also collapsed (${run} chars)`);
+      sendApiError(res, 502, 'The model returned unreadable output twice in a row. Try asking that again in different words.');
+      return;
+    }
+
+    console.log(
+      `[followup] ok in ${Date.now() - startedAt}ms · turn ${askedSoFar + 1}/${MAX_FOLLOWUP_TURNS} · ` +
+        `provider: ${result.payload.provider || 'unknown'} · ` +
+        `tokens: ${result.payload?.usage?.completion_tokens ?? '?'} completion`
+    );
+
+    sendJson(res, 200, { answer, remaining: MAX_FOLLOWUP_TURNS - (askedSoFar + 1) });
+  } catch (error) {
+    const elapsed = Date.now() - startedAt;
+    if (error?.name === 'AbortError') {
+      console.error(`[followup] TIMEOUT after ${elapsed}ms · model: ${OPENROUTER_MODEL}`);
+      sendApiError(
+        res,
+        504,
+        `The follow-up timed out after ${Math.round(UPSTREAM_TIMEOUT_MS / 1000)} seconds. Ask it again; the model provider may be overloaded.`
+      );
+      return;
+    }
+    console.error(`[followup] failed after ${elapsed}ms: ${error instanceof Error ? error.message : error}`);
+    sendApiError(res, 502, error instanceof Error ? error.message : 'Unknown upstream error');
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
 const server = http.createServer((req, res) => {
   const rawPath = new URL(req.url || '/', `http://${req.headers.host || 'localhost'}`).pathname;
 
-  if (rawPath === '/api/analyze') {
-    handleAnalyze(req, res).catch(() => {
+  const apiHandler = rawPath === '/api/analyze' ? handleAnalyze : rawPath === '/api/followup' ? handleFollowup : null;
+
+  if (apiHandler) {
+    apiHandler(req, res).catch(() => {
       if (!res.headersSent) sendApiError(res, 500, 'Unexpected server error');
       else res.destroy();
     });
