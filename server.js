@@ -269,11 +269,135 @@ function extractJson(text) {
   }
 }
 
+// DeepSeek V4 Flash occasionally collapses into degenerate repetition under strict
+// grammar-constrained decoding, emitting runs of schema-key-like identifiers
+// ("hackType_verticalUVP_noveltyVectorNoveltyClassification_ideaCategory_...") in place
+// of prose. It is stochastic — the same prompt usually succeeds on a retry — and it is
+// most likely when the founder's own idea contains identifier-like text.
+//
+// Threshold note: the model legitimately quotes a founder's camelCase back at them when
+// they put it in the idea, and those quotes measure 40-60 characters. Observed
+// degenerate runs are 200+. 80 separates the two without punishing honest quoting.
+const MAX_UNBROKEN_RUN = 80;
+
+function longestUnbrokenRun(text) {
+  let longest = 0;
+  for (const word of String(text).split(/\s+/)) {
+    if (word.length > longest) longest = word.length;
+  }
+  return longest;
+}
+
+// Walks every string the model produced, including array items, since the collapse shows
+// up field by field rather than corrupting the whole response.
+function findDegenerateField(analysis) {
+  if (!analysis || typeof analysis !== 'object') return null;
+  for (const [field, value] of Object.entries(analysis)) {
+    for (const item of Array.isArray(value) ? value : [value]) {
+      if (typeof item !== 'string') continue;
+      const run = longestUnbrokenRun(item);
+      if (run >= MAX_UNBROKEN_RUN) return { field, run };
+    }
+  }
+  return null;
+}
+
+const ANTI_DEGENERATION_NUDGE =
+  '\n\nEvery string field must be ordinary readable prose — plain English sentences and ' +
+  'normal words separated by spaces. Never emit identifiers, schema keys, camelCase ' +
+  'names, or underscore-joined tokens as the content of a field.';
+
 function appUrl(req) {
   if (process.env.APP_URL) return process.env.APP_URL;
   const proto = req.headers['x-forwarded-proto'] || 'http';
   const host = req.headers.host || `localhost:${port}`;
   return `${proto}://${host}`;
+}
+
+// Returns a discriminated result instead of writing to `res`, so the caller can make a
+// second attempt when the first one comes back degenerate.
+async function callModel({ systemPrompt, userPrompt, referer, signal }) {
+  const upstream = await fetch(OPENROUTER_URL, {
+    method: 'POST',
+    signal,
+    headers: {
+      Authorization: `Bearer ${OPENROUTER_API_KEY}`,
+      'Content-Type': 'application/json',
+      'HTTP-Referer': referer,
+      'X-Title': APP_TITLE
+    },
+    body: JSON.stringify({
+      model: OPENROUTER_MODEL,
+      messages: [
+        { role: 'system', content: systemPrompt },
+        { role: 'user', content: userPrompt }
+      ],
+      reasoning: REASONING_CONFIG,
+      response_format: { type: 'json_schema', json_schema: STARTUP_ANALYSIS_SCHEMA },
+      provider: {
+        // Several DeepSeek V4 Flash providers expose `response_format` but NOT
+        // `structured_outputs`. Without this, OpenRouter may route to one of them and
+        // the strict schema is silently ignored, producing prose instead of JSON.
+        require_parameters: true,
+        // Default routing is price-weighted (inverse square of price), which favours the
+        // cheapest provider rather than a fast one and can land on a degraded endpoint.
+        // This is an interactive request with a human waiting, so sort by throughput.
+        sort: 'throughput'
+      },
+      max_tokens: 2200
+    })
+  });
+
+  const rawBody = await upstream.text();
+  const requestId = upstream.headers.get('x-request-id');
+
+  let payload;
+  try {
+    payload = rawBody ? JSON.parse(rawBody) : {};
+  } catch {
+    return {
+      kind: 'error',
+      requestId,
+      status: 502,
+      message: `OpenRouter returned an unreadable response (HTTP ${upstream.status}): ${rawBody.slice(0, 180) || 'empty body'}`
+    };
+  }
+
+  if (upstream.status === 401 || upstream.status === 403) {
+    // OpenRouter's own wording here ("User not found.") reads like the *end user* is the
+    // problem. It is not — it means the server's key was rejected.
+    console.error(
+      `[auth] OpenRouter rejected the server key (HTTP ${upstream.status}): ${payload?.error?.message || 'no detail'}\n` +
+        `[auth] OPENROUTER_API_KEY shape: ${describeKeyShape(RAW_API_KEY)}\n` +
+        '[auth] Verify with: curl -s https://openrouter.ai/api/v1/key -H "Authorization: Bearer $OPENROUTER_API_KEY"'
+    );
+    return {
+      kind: 'error',
+      requestId,
+      status: 503,
+      message: 'The idea validator is offline right now. This is a problem on our side, not yours — try again shortly.'
+    };
+  }
+
+  if (!upstream.ok || payload?.error) {
+    // Relay OpenRouter's own error shape so the browser can render provider detail.
+    return { kind: 'relay', requestId, status: upstream.ok ? 502 : upstream.status, payload };
+  }
+
+  const choice = payload?.choices?.[0];
+  const content = getMessageText(choice?.message);
+  if (!content) {
+    const completionTokens = payload?.usage?.completion_tokens;
+    const tokenDetail = Number.isFinite(completionTokens) ? ` Completion tokens: ${completionTokens}.` : '';
+    return {
+      kind: 'error',
+      requestId,
+      status: 502,
+      message: `OpenRouter returned no visible answer (finish reason: ${choice?.finish_reason || 'missing'}).${tokenDetail}`
+    };
+  }
+
+  return { kind: 'ok', requestId, payload, analysis: extractJson(content) };
 }
 
 async function handleAnalyze(req, res) {
@@ -323,82 +447,53 @@ async function handleAnalyze(req, res) {
   const startedAt = Date.now();
 
   try {
-    const upstream = await fetch(OPENROUTER_URL, {
-      method: 'POST',
-      signal: controller.signal,
-      headers: {
-        Authorization: `Bearer ${OPENROUTER_API_KEY}`,
-        'Content-Type': 'application/json',
-        'HTTP-Referer': appUrl(req),
-        'X-Title': APP_TITLE
-      },
-      body: JSON.stringify({
-        model: OPENROUTER_MODEL,
-        messages: [
-          { role: 'system', content: systemPrompt },
-          { role: 'user', content: userPrompt }
-        ],
-        reasoning: REASONING_CONFIG,
-        response_format: { type: 'json_schema', json_schema: STARTUP_ANALYSIS_SCHEMA },
-        provider: {
-          // Several DeepSeek V4 Flash providers expose `response_format` but NOT
-          // `structured_outputs`. Without this, OpenRouter may route to one of them and
-          // the strict schema is silently ignored, producing prose instead of JSON.
-          require_parameters: true,
-          // Default routing is price-weighted (inverse square of price), which favours the
-          // cheapest provider rather than a fast one and can land on a degraded endpoint.
-          // This is an interactive request with a human waiting, so sort by throughput.
-          sort: 'throughput'
-        },
-        max_tokens: 2200
-      })
-    });
+    const referer = appUrl(req);
+    let result = await callModel({ systemPrompt, userPrompt, referer, signal: controller.signal });
+    let degenerate = result.kind === 'ok' ? findDegenerateField(result.analysis) : null;
 
-    const rawBody = await upstream.text();
-    let payload;
-    try {
-      payload = rawBody ? JSON.parse(rawBody) : {};
-    } catch {
+    // The collapse is stochastic, so one retry with an explicit "write prose" instruction
+    // recovers the overwhelming majority of these. Better a slower answer than a card
+    // full of identifier soup.
+    if (degenerate) {
+      console.warn(
+        `[degenerate] ${degenerate.field} contained a ${degenerate.run}-character unbroken run · ` +
+          `provider: ${result.payload?.provider || 'unknown'} · retrying once`
+      );
+      result = await callModel({
+        systemPrompt: systemPrompt + ANTI_DEGENERATION_NUDGE,
+        userPrompt,
+        referer,
+        signal: controller.signal
+      });
+      degenerate = result.kind === 'ok' ? findDegenerateField(result.analysis) : null;
+    }
+
+    if (result.requestId) res.setHeader('x-request-id', result.requestId);
+
+    if (result.kind === 'error') {
+      sendApiError(res, result.status, result.message);
+      return;
+    }
+
+    if (result.kind === 'relay') {
+      sendJson(res, result.status, result.payload);
+      return;
+    }
+
+    if (degenerate) {
+      console.error(
+        `[degenerate] retry also collapsed (${degenerate.field}, ${degenerate.run} chars) · ` +
+          `provider: ${result.payload?.provider || 'unknown'}`
+      );
       sendApiError(
         res,
         502,
-        `OpenRouter returned an unreadable response (HTTP ${upstream.status}): ${rawBody.slice(0, 180) || 'empty body'}`
+        'The model returned unreadable output twice in a row. Try again, or reword the idea without code-style identifiers.'
       );
       return;
     }
 
-    const requestId = upstream.headers.get('x-request-id');
-    if (requestId) res.setHeader('x-request-id', requestId);
-
-    if (upstream.status === 401 || upstream.status === 403) {
-      // OpenRouter's own wording here ("User not found.") reads like the *end user* is the
-      // problem. It is not — it means the server's key was rejected.
-      const upstreamMessage = payload?.error?.message || 'no detail';
-      console.error(
-        `[auth] OpenRouter rejected the server key (HTTP ${upstream.status}): ${upstreamMessage}\n` +
-          `[auth] OPENROUTER_API_KEY shape: ${describeKeyShape(RAW_API_KEY)}\n` +
-          '[auth] Verify with: curl -s https://openrouter.ai/api/v1/key -H "Authorization: Bearer $OPENROUTER_API_KEY"'
-      );
-      sendApiError(res, 503, 'The idea validator is offline right now. This is a problem on our side, not yours — try again shortly.');
-      return;
-    }
-
-    if (!upstream.ok || payload?.error) {
-      // Relay OpenRouter's own error shape so the browser can render provider detail.
-      sendJson(res, upstream.ok ? 502 : upstream.status, payload);
-      return;
-    }
-
-    const choice = payload?.choices?.[0];
-    const content = getMessageText(choice?.message);
-    if (!content) {
-      const finishReason = choice?.finish_reason || 'missing';
-      const completionTokens = payload?.usage?.completion_tokens;
-      const tokenDetail = Number.isFinite(completionTokens) ? ` Completion tokens: ${completionTokens}.` : '';
-      sendApiError(res, 502, `OpenRouter returned no visible answer (finish reason: ${finishReason}).${tokenDetail}`);
-      return;
-    }
-
+    const { payload } = result;
     console.log(
       `[upstream] ok in ${Date.now() - startedAt}ms · provider: ${payload.provider || 'unknown'} · ` +
         `model: ${payload.model || OPENROUTER_MODEL} · ` +
@@ -408,7 +503,7 @@ async function handleAnalyze(req, res) {
 
     sendJson(res, 200, {
       model: payload.model || OPENROUTER_MODEL,
-      analysis: extractJson(content)
+      analysis: result.analysis
     });
   } catch (error) {
     const elapsed = Date.now() - startedAt;

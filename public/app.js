@@ -74,10 +74,23 @@ function clampScore(value) {
   return Math.max(0, Math.min(100, Math.round(Number(value) || 0)));
 }
 
+// Backstop for the same model collapse the server screens for (see findDegenerateField in
+// server.js). A list can lose its bad entries and still be useful, so drop them here
+// rather than failing the whole render. Measured before truncation, since slicing to 220
+// would hide the tail of a longer run.
+const MAX_UNBROKEN_RUN = 80;
+
+function looksDegenerate(text) {
+  return text.split(/\s+/).some((word) => word.length >= MAX_UNBROKEN_RUN);
+}
+
 function safeList(value, fallback) {
-  return Array.isArray(value) && value.length
-    ? value.map((item) => String(item).slice(0, 220)).slice(0, 5)
-    : fallback;
+  if (!Array.isArray(value)) return fallback;
+  const clean = value
+    .filter((item) => !looksDegenerate(String(item)))
+    .map((item) => String(item).slice(0, 220))
+    .slice(0, 5);
+  return clean.length ? clean : fallback;
 }
 
 function normalizeResult(raw = {}) {
