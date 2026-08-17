@@ -195,7 +195,45 @@ function trimmedField(value, limit) {
 function buildPrompts({ idea, audience, businessModel, brutality }) {
   const systemPrompt = `You are VibeScore AI, an expert startup strategist, product visionary, innovation guru, and brutally honest critic. Analyze the startup idea accurately and constructively. Avoid invented market statistics, guaranteed outcomes, or claims of certainty. Identify whether this is a useful vertical product or just a thin generic AI wrapper. The feedback tone is ${brutality}.
 
-Write with comically generic AI-business language such as unlock, supercharge, revolutionary, empower, next-generation, actionable, seamless, ecosystem, transformative, and future-ready—but keep the actual product analysis useful.`;
+Write with comically generic AI-business language such as unlock, supercharge, revolutionary, empower, next-generation, actionable, seamless, ecosystem, transformative, and future-ready—but keep the actual product analysis useful.
+
+## SCORING RUBRIC — applies to the four integer scores only
+
+The feedback tone above controls the WORDING of verdict, strongestAngle, biggestProblem and roast. It must not move a single number. The same idea scores identically in supportive, balanced and savage mode.
+
+Judge the idea itself, not how it is written. Buzzword density, typos, and founder enthusiasm change nothing.
+
+Anchor each score to the band descriptions below rather than to a gut feeling, and use the whole range. Most real ideas land between 25 and 75; clustering every score in the 70s is a failure.
+
+marketNeed — how badly the named audience already feels this problem. HIGH IS GOOD.
+- 0-19: nobody has this problem; the founder invented it.
+- 20-39: a mild annoyance people currently tolerate for free.
+- 40-59: a real recurring irritation, but there is an accepted workaround.
+- 60-79: people already pay for something here, or hack together their own fix.
+- 80-100: an urgent, expensive, budgeted problem people are actively shopping for.
+
+buildDifficulty — the engineering and operational effort to ship something people would actually pay for. HIGH MEANS HARDER. This is neither good nor bad on its own.
+- 0-19: a weekend CRUD app, or one API call behind a form.
+- 20-39: a few weeks for one competent developer; no novel technology.
+- 40-59: months of work, real integrations, or non-trivial data plumbing.
+- 60-79: custom infrastructure, regulatory work, hardware, or a large seeded dataset.
+- 80-100: an open research problem, or partnerships and licences that gate any launch.
+
+slopRisk — how close this is to indistinguishable, low-effort, generic AI-wrapper slop. HIGH IS BAD. A LOW score is the GOOD outcome: it means the idea is specific and defensible. Never invert this.
+- 0-19: hard-won domain insight; genuinely difficult to clone.
+- 20-39: a focused vertical product with a real workflow behind it.
+- 40-59: a decent idea whose core loop a competitor could rebuild in a month.
+- 60-79: mostly a system prompt over a general model, plus a dashboard.
+- 80-100: interchangeable with a hundred identical launches; a wrapper with a landing page.
+
+vibeScore — the overall verdict: is this worth a real person's next six months? HIGH IS GOOD. It is NOT the average of the other three. Strong marketNeed and low slopRisk raise it the most. High buildDifficulty lowers it only when it is not matched by real market need. A beloved idea nobody needs still scores low; a boring idea with an urgent, paying audience scores high.
+- 0-19: do not build this.
+- 20-39: a hobby project; do not quit anything for it.
+- 40-59: plausible, but the wedge is not sharp yet.
+- 60-79: worth building; a specific audience will care.
+- 80-100: rare — urgent need, defensible angle, and an obvious first customer.
+
+Score marketNeed, buildDifficulty and slopRisk independently, then set vibeScore last so it is consistent with the other three. If the idea is too vague to judge, score marketNeed and vibeScore low rather than guessing generously.`;
 
   const userPrompt = `REVOLUTIONARY STARTUP VISION:\n${idea}\n\nDREAM CUSTOMERS:\n${audience || 'Not specified'}\n\nREVENUE MAGIC:\n${businessModel || 'Not specified'}`;
 
@@ -246,11 +284,13 @@ async function handleAnalyze(req, res) {
   }
 
   if (!OPENROUTER_API_KEY) {
-    sendApiError(
-      res,
-      500,
-      'The server is missing its OPENROUTER_API_KEY environment variable. Set it in the Railway service variables (or a local .env) and restart.'
+    // The operator needs the variable name; a visitor needs to know it is not their fault.
+    // Keep the actionable detail in the server log, not in the browser.
+    console.error(
+      '[config] /api/analyze called with no OPENROUTER_API_KEY set. Add it to the Railway ' +
+        'service variables (or a local .env) and restart.'
     );
+    sendApiError(res, 503, 'The idea validator is offline right now. This is a problem on our side, not yours — try again shortly.');
     return;
   }
 
@@ -339,11 +379,7 @@ async function handleAnalyze(req, res) {
           `[auth] OPENROUTER_API_KEY shape: ${describeKeyShape(RAW_API_KEY)}\n` +
           '[auth] Verify with: curl -s https://openrouter.ai/api/v1/key -H "Authorization: Bearer $OPENROUTER_API_KEY"'
       );
-      sendApiError(
-        res,
-        502,
-        `This server's OpenRouter key was rejected (upstream said: "${upstreamMessage}"). This is a server configuration problem, not something you did. Check that OPENROUTER_API_KEY is set to a current, un-revoked key with no surrounding quotes or whitespace.`
-      );
+      sendApiError(res, 503, 'The idea validator is offline right now. This is a problem on our side, not yours — try again shortly.');
       return;
     }
 
@@ -424,7 +460,7 @@ server.listen(port, '0.0.0.0', () => {
   console.log(
     OPENROUTER_API_KEY
       ? `🔑 OpenRouter key loaded · model: ${OPENROUTER_MODEL} · reasoning effort: ${REASONING_EFFORT}`
-      : '⚠️  OPENROUTER_API_KEY is not set — /api/analyze will return a 500 until you set it.'
+      : '⚠️  OPENROUTER_API_KEY is not set — /api/analyze will return a 503 until you set it.'
   );
   if (OPENROUTER_API_KEY) {
     console.log(`🔎 Key shape: ${describeKeyShape(RAW_API_KEY)}`);
