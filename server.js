@@ -234,11 +234,11 @@ Write with comically generic AI-business language such as unlock, supercharge, r
 
 ## LENGTH BUDGET
 
-Each prose field is rendered whole on a card, so finish every thought inside its budget rather than trailing off:
-- verdict: at most 90 words.
-- strongestAngle and biggestProblem: at most 80 words each.
-- roast: at most 70 words. Land the joke and stop.
-- every unfairAdvantages, features and nextSteps item: one sentence, at most 25 words.
+Each prose field is rendered whole on a card, so finish every thought inside its budget rather than trailing off. Aim for the middle of each range — the lower bound matters as much as the upper one, and a field that lands well under it is thin, not concise:
+- verdict: 70-110 words.
+- strongestAngle and biggestProblem: 70-100 words each. Say what the problem or angle actually is, then why it matters.
+- roast: 45-80 words. Land the joke and stop.
+- every unfairAdvantages, features and nextSteps item: one specific sentence, 12-30 words.
 
 ## SCORING RUBRIC — applies to the four integer scores only
 
