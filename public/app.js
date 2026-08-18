@@ -91,11 +91,33 @@ function looksDegenerate(text) {
   return text.split(/\s+/).some((word) => word.length >= MAX_UNBROKEN_RUN);
 }
 
+// Mirrors MAX_PROSE_LENGTH / MAX_VERDICT_LENGTH / MAX_LIST_ITEM_LENGTH in server.js. Both
+// ends have to agree: the browser renders these strings and then posts them back as
+// follow-up context, so a tighter cap here would quietly show the founder one roast while
+// the model discusses another.
+const MAX_PROSE_LENGTH = 1200;
+const MAX_VERDICT_LENGTH = 1600;
+const MAX_LIST_ITEM_LENGTH = 400;
+
+// The cap is a backstop for a runaway generation, not a routine edit — the prompt's length
+// budget is what normally keeps these in range. A bare slice ends mid-word and reads like
+// the app broke, so back up to the last word boundary and mark the cut.
+function truncateProse(value, limit) {
+  const text = String(value ?? '').trim();
+  if (text.length <= limit) return text;
+
+  const head = text.slice(0, limit - 1);
+  const boundary = head.search(/\s+\S*$/);
+  // An unbroken run with no late boundary has nothing sensible to back up to; hard-cut it
+  // rather than throwing away most of the text.
+  return (boundary > limit * 0.6 ? head.slice(0, boundary) : head).trimEnd() + '…';
+}
+
 function safeList(value, fallback) {
   if (!Array.isArray(value)) return fallback;
   const clean = value
     .filter((item) => !looksDegenerate(String(item)))
-    .map((item) => String(item).slice(0, 220))
+    .map((item) => truncateProse(item, MAX_LIST_ITEM_LENGTH))
     .slice(0, 5);
   return clean.length ? clean : fallback;
 }
@@ -103,18 +125,18 @@ function safeList(value, fallback) {
 function normalizeResult(raw = {}) {
   return {
     name: String(raw.name || 'Untitled AI Revolution').slice(0, 90),
-    tagline: String(raw.tagline || 'Transforming the future, one gradient at a time.').slice(0, 180),
+    tagline: truncateProse(raw.tagline || 'Transforming the future, one gradient at a time.', 180),
     vibeScore: clampScore(raw.vibeScore),
     slopRisk: clampScore(raw.slopRisk),
     marketNeed: clampScore(raw.marketNeed),
     buildDifficulty: clampScore(raw.buildDifficulty),
-    verdict: String(raw.verdict || 'The neural engine detected both potential and an urgent need for customer interviews.').slice(0, 1000),
-    strongestAngle: String(raw.strongestAngle || 'A focused workflow for a specific group of users.').slice(0, 500),
-    biggestProblem: String(raw.biggestProblem || 'The product may be easy to copy and hard to distribute.').slice(0, 500),
+    verdict: truncateProse(raw.verdict || 'The neural engine detected both potential and an urgent need for customer interviews.', MAX_VERDICT_LENGTH),
+    strongestAngle: truncateProse(raw.strongestAngle || 'A focused workflow for a specific group of users.', MAX_PROSE_LENGTH),
+    biggestProblem: truncateProse(raw.biggestProblem || 'The product may be easy to copy and hard to distribute.', MAX_PROSE_LENGTH),
     unfairAdvantages: safeList(raw.unfairAdvantages, ['Focused distribution', 'Workflow-specific data', 'Actually talking to users']),
     features: safeList(raw.features, ['One excellent core workflow', 'Useful exports', 'A dashboard with at least three gradients']),
     nextSteps: safeList(raw.nextSteps, ['Interview five target users', 'Build the smallest useful prototype', 'Measure repeated usage']),
-    roast: String(raw.roast || 'This idea is one animated orb away from a $49 monthly subscription.').slice(0, 600)
+    roast: truncateProse(raw.roast || 'This idea is one animated orb away from a $49 monthly subscription.', MAX_PROSE_LENGTH)
   };
 }
 

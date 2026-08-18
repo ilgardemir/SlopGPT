@@ -73,7 +73,15 @@ const MIN_QUESTION_LENGTH = 3;
 const MAX_FOLLOWUP_TURNS = 8;
 const MAX_HISTORY_ENTRIES = MAX_FOLLOWUP_TURNS * 2;
 const MAX_HISTORY_ENTRY_LENGTH = 2000;
-const MAX_LIST_ITEM_LENGTH = 220;
+
+// Caps on prose the model wrote. These are deliberately far above the length budget the
+// prompt asks for (70-90 words, so roughly 400-550 characters) because they exist to stop
+// a runaway generation, not to edit normal output. The earlier 500/600 caps sat *below*
+// what the model actually returns — measured roasts ran 460-943 characters — so the
+// Founder Reality Check was being cut mid-sentence on most analyses.
+const MAX_PROSE_LENGTH = 1200;
+const MAX_VERDICT_LENGTH = 1600;
+const MAX_LIST_ITEM_LENGTH = 400;
 
 const MIME_TYPES = {
   '.html': 'text/html; charset=utf-8',
@@ -204,10 +212,33 @@ function trimmedField(value, limit) {
   return typeof value === 'string' ? value.trim().slice(0, limit) : '';
 }
 
+// Prose the model wrote, as opposed to input the founder typed. The cap is a backstop
+// against a runaway generation, not a routine edit — the prompt's length budget is what
+// normally keeps these fields in range. When it does fire, a bare slice ends mid-word and
+// reads as if the app broke, so back up to the last word boundary and mark the cut.
+function truncateProse(value, limit) {
+  const text = typeof value === 'string' ? value.trim() : '';
+  if (text.length <= limit) return text;
+
+  const head = text.slice(0, limit - 1);
+  const boundary = head.search(/\s+\S*$/);
+  // An unbroken run with no late boundary has nothing sensible to back up to; hard-cut it
+  // rather than throwing away most of the text.
+  return (boundary > limit * 0.6 ? head.slice(0, boundary) : head).trimEnd() + '…';
+}
+
 function buildPrompts({ idea, audience, businessModel, brutality }) {
   const systemPrompt = `You are VibeScore AI, an expert startup strategist, product visionary, innovation guru, and brutally honest critic. Analyze the startup idea accurately and constructively. Avoid invented market statistics, guaranteed outcomes, or claims of certainty. Identify whether this is a useful vertical product or just a thin generic AI wrapper. The feedback tone is ${brutality}.
 
 Write with comically generic AI-business language such as unlock, supercharge, revolutionary, empower, next-generation, actionable, seamless, ecosystem, transformative, and future-ready—but keep the actual product analysis useful.
+
+## LENGTH BUDGET
+
+Each prose field is rendered whole on a card, so finish every thought inside its budget rather than trailing off:
+- verdict: at most 90 words.
+- strongestAngle and biggestProblem: at most 80 words each.
+- roast: at most 70 words. Land the joke and stop.
+- every unfairAdvantages, features and nextSteps item: one sentence, at most 25 words.
 
 ## SCORING RUBRIC — applies to the four integer scores only
 
@@ -263,23 +294,23 @@ function sanitizeAnalysis(raw) {
   const list = (value) =>
     (Array.isArray(value) ? value : [])
       .slice(0, 5)
-      .map((item) => trimmedField(item, MAX_LIST_ITEM_LENGTH))
+      .map((item) => truncateProse(item, MAX_LIST_ITEM_LENGTH))
       .filter(Boolean);
 
   return {
     name: trimmedField(raw.name, 90),
-    tagline: trimmedField(raw.tagline, 180),
+    tagline: truncateProse(raw.tagline, 180),
     vibeScore: score(raw.vibeScore),
     slopRisk: score(raw.slopRisk),
     marketNeed: score(raw.marketNeed),
     buildDifficulty: score(raw.buildDifficulty),
-    verdict: trimmedField(raw.verdict, 1000),
-    strongestAngle: trimmedField(raw.strongestAngle, MAX_FIELD_LENGTH),
-    biggestProblem: trimmedField(raw.biggestProblem, MAX_FIELD_LENGTH),
+    verdict: truncateProse(raw.verdict, MAX_VERDICT_LENGTH),
+    strongestAngle: truncateProse(raw.strongestAngle, MAX_PROSE_LENGTH),
+    biggestProblem: truncateProse(raw.biggestProblem, MAX_PROSE_LENGTH),
     unfairAdvantages: list(raw.unfairAdvantages),
     features: list(raw.features),
     nextSteps: list(raw.nextSteps),
-    roast: trimmedField(raw.roast, 600)
+    roast: truncateProse(raw.roast, MAX_PROSE_LENGTH)
   };
 }
 
