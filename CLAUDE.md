@@ -41,5 +41,21 @@ intermediate state is acceptable — the owner confirms issues directly against 
 site. Prefer several small commits over one large one, and write a real commit message
 describing the change rather than batching unrelated work together.
 
+## Testing against the live site
+
+**https://slopgpt-production.up.railway.app/**
+
+This is the deployed site, and the only place the app runs with a real OpenRouter key —
+so it is where model-dependent behaviour actually gets tested. Locally there is no key:
+`/api/analyze` and `/api/followup` return a 503 and only the static page and the request
+validation can be exercised.
+
+Commit and push first, give Railway a moment to redeploy, then test there. A change that
+has not been pushed is not on that URL, so verifying before pushing tests the old build.
+
+Local testing still comes first for anything that does not need a key — page rendering,
+form and validation logic, error states, layout. Stubbing the two endpoints against a
+local server is a good way to drive the results UI without spending tokens.
+
 Normal caution still applies to genuinely destructive operations: no `push --force`,
 no history rewriting, no `reset --hard` over uncommitted work without asking.
