@@ -48,7 +48,7 @@ const SCORE_HELP = [
     direction: 'Lower is better',
     tone: 'bad',
     body:
-      'How close your idea is to generic, low-effort AI-wrapper slop. This one is inverted: a LOW score is the good outcome and means your idea is specific and hard to clone. A HIGH score means it reads as a system prompt over a general model with a dashboard bolted on.'
+      'How generic and easily cloned your idea is. This one is inverted: a LOW score is the good outcome and means your idea is specific and hard to copy. A HIGH score means a competitor could offer the same thing next week — an AI wrapper with a dashboard bolted on, or a familiar business with one twist. Not having any AI in your idea does not count against you here.'
   },
   {
     emoji: '📈',
