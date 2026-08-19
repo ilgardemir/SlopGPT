@@ -74,11 +74,11 @@ const MAX_FOLLOWUP_TURNS = 8;
 const MAX_HISTORY_ENTRIES = MAX_FOLLOWUP_TURNS * 2;
 const MAX_HISTORY_ENTRY_LENGTH = 2000;
 
-// Caps on prose the model wrote. These are deliberately far above the length budget the
-// prompt asks for (70-90 words, so roughly 400-550 characters) because they exist to stop
-// a runaway generation, not to edit normal output. The earlier 500/600 caps sat *below*
-// what the model actually returns — measured roasts ran 460-943 characters — so the
-// Founder Reality Check was being cut mid-sentence on most analyses.
+// Caps on prose the model wrote. These sit deliberately far above the length budget the
+// prompt asks for (45-110 words depending on the field, so roughly 250-700 characters)
+// because they exist to stop a runaway generation, not to edit normal output. The earlier
+// 500/600 caps sat *below* what the model actually returns — measured roasts ran 460-943
+// characters — so the Founder Reality Check was being cut mid-sentence on most analyses.
 const MAX_PROSE_LENGTH = 1200;
 const MAX_VERDICT_LENGTH = 1600;
 const MAX_LIST_ITEM_LENGTH = 400;
